@@ -729,6 +729,72 @@ end # function apply_reduction_rules_new!
 
 
 """
+    apply_reduction_rules_new_lns_init_sol!(solution::DFVSPSolution, init_sol::Vector{Int})
+Apply reduction rules to the graph given in the instance in DFVSPSolution to decrease its size.
+Use the reduction rules based on the vertex mappings in solution.
+Use a new variant of the merging rules to ensure correctness of `init_sol`.
+
+Returns: an array of arrays, each of which is an entire strongly connected component of the reduced graph
+"""
+function apply_reduction_rules_new_lns_init_sol!(solution::DFVSPSolution, init_sol::Vector{Int})
+
+    # debugging - start
+    # println("Length of reverse_vmaps_list before reduction rules: ", length(solution.reverse_vmaps_list))
+    # debugging - end  
+
+    degree_zero_applicable = true
+    indegree_one_applicable = true
+    outdegree_one_applicable = true
+    self_loop_applicable = true
+    scc_applicable = true
+
+    sccs = Array{Array{Int, 1}, 1}()
+
+    #= TODO: possible alternative approach
+        - use an outer while-loop over scc_applicable and inside the while-loop for the other rules
+        - => let the other rules take care of iteratively reducing the graph, call scc-algorithm less often
+        - QUESTION: is it more efficient to call the other rules (especially the merging rules) more often, or rather the scc-algorithm more often?
+    =#
+
+    # iterate over reduction rules until the graph cannot be reduced any further
+    while (degree_zero_applicable || indegree_one_applicable || outdegree_one_applicable || self_loop_applicable || scc_applicable)
+
+        degree_zero_applicable = remove_indegree_outdegree_zero_new!(solution)
+        # merge_indegree_one!(solution)
+        # merge_outdegree_one!(solution)
+
+        # merge_indegree_one_alternative1!(solution)
+        # merge_outdegree_one_alternative1!(solution)
+
+        # indegree_one_applicable = merge_indegree_one_alternative2_new!(solution)
+        # outdegree_one_applicable = merge_outdegree_one_alternative2_new!(solution)
+
+        indegree_one_applicable = merge_indegree_one_alternative3_new_lns_init_sol!(solution, init_sol)
+        outdegree_one_applicable = merge_outdegree_one_alternative3_new_lns_init_sol!(solution, init_sol)
+
+        # test remove_self_loops!
+        # vertex = first(vertices(solution.inst.graph))
+        # add_edge!(solution.inst.graph, vertex, vertex)
+
+        # call rule for self-loops after the other rules as the original graph does not contain self-loops
+        self_loop_applicable = remove_self_loops_new!(solution)
+
+        # call rule for SCCs -> returns list of SCCs as well as boolean
+        sccs, scc_applicable = reduce_graph_using_strongly_connected_components_new!(solution)
+    end
+
+    # debugging - start
+
+    # println("Length of reverse_vmaps_list after reduction rules: ", length(solution.reverse_vmaps_list))
+
+    # debugging - end
+
+    return sccs
+
+end # function apply_reduction_rules_new_lns_init_sol!
+
+
+"""
  remove_indegree_outdegree_zero_new!(solution::DFVSPSolution)
 Remove all vertices with in-degree = 0 or out-degree = 0 and all their incident edges from the graph given in the instance inside solution.
 Update mappings of vertex labels in solution.
@@ -1802,6 +1868,501 @@ function reduce_graph_using_strongly_connected_components_new!(solution::DFVSPSo
 end # function reduce_graph_using_strongly_connected_components_new!
 
 
+"""
+    merge_indegree_one_alternative3_new_lns_init_sol!(solution::DFVSPSolution, init_sol::Vector{Int})
+Merge all vertices with in-degree = 1 with their predecessor.
+Update mappings of vertex labels in solution. 
+Ensure correctness of `init_sol` by replacing a merged vertex with its predecessor.
+Implementation: get all vertices with in-degree = 1 once in the beginning and remove vertices after each merge 
+    => next vertex to be merged gets new label and has to be mapped to this new label before merging 
+    -> this is done by using the mappings in solution
+    -> could be inefficient
+Steps:
+    - find vertex with in-degree = 1
+    - get list of adjacent vertices
+    - add edges to adjacent vertices to the predecessor vertex
+    - remove vertex
+
+Returns: true if rule has been applied, false otherwise
+"""
+function merge_indegree_one_alternative3_new_lns_init_sol!(solution::DFVSPSolution, init_sol::Vector{Int})
+    rule_applicable = false
+    
+    # get all vertices with in-degree = 1 once in the beginning and remove vertices after each merge 
+    # => next vertex to be merged gets new label and has to be mapped to this new label before merging -> could be inefficient
+    graph = solution.inst.graph
+    incoming_edges = graph.badjlist
+    outgoing_edges = graph.fadjlist
+
+    # incoming_edges = Base.deepcopy(graph.badjlist)
+    # outgoing_edges = Base.deepcopy(graph.fadjlist)
+
+    # collect all vertices with in-degree = 1 in a vector
+    indegree_one = [v for v in vertices(graph) if length(incoming_edges[v]) == 1]
+
+    vertices_with_self_loops = Vector{Int}()
+    # merging_reverse_vmaps = Vector{Vector{Integer}}()
+    # removed_vertices = Set{Int}()
+
+    n = nv(solution.inst.graph)
+    # current label of every vertex is the vertex itself
+    # merging_vmap = collect(1:n)
+
+
+    # debugging - start
+
+    # println("Incoming edges: $incoming_edges")
+    # println("Outgoing edges: $outgoing_edges")
+
+    original_vertex_number = nv(graph)
+    original_edge_number = ne(graph) 
+    
+    @debug "Number of vertices with indegree = 1: $(length(indegree_one))"
+    # println("Vertices with indegree = 1: ", length(indegree_one))   
+
+    #= 
+    for x in indegree_one
+        # println("Vertex to merge: $x")
+    end 
+
+    if (!isempty(indegree_one))
+        to_merge = indegree_one[1]
+        println("Before merge, indegree = 1: Graph contains vertex $to_merge: ", has_vertex(graph, to_merge))
+    end 
+     =#
+
+    # debugging - end   
+
+    # store vertex mapping in solution
+    # in the end, these mappings are needed to determine the original vertex label of the vertices in the feedback set
+    if (!isempty(indegree_one))
+        rule_applicable = true
+
+        # Sort the vertices to be merged -> TODO: necessary?
+        vertices_to_merge = sort(indegree_one)
+
+        # build list of original labels of the vertices to be merged
+        vertices_to_merge_orig_labels = Vector{Int}()
+        for vertex in vertices_to_merge
+            orig_label = solution.vmap_new_orig[vertex]
+            push!(vertices_to_merge_orig_labels, orig_label)
+        end
+
+        # merge_vertices! from Graphs merges the vertices in the given list to the vertex with the lowest number
+        # BUT: merge_vertices! Supports [`SimpleGraph`](@ref) only.
+        # => own implementation necessary!
+        # Traverse the list of vertices and add all their outgoing edges to their predecessor
+        for vertex_orig in vertices_to_merge_orig_labels
+
+            remove_predecessor = false
+
+            new_vertex_label = solution.vmap_orig_new[vertex_orig]
+
+            # check if vertex has already been removed in another iteration
+            if (new_vertex_label == 0)
+                continue
+            end
+            
+            # check if predecessor has already been removed in another iteration => in-degree = 0 which will be caught be another reduction rule
+            if isempty(incoming_edges[new_vertex_label])
+                continue
+            end
+
+            predecessor = first(incoming_edges[new_vertex_label])
+            for successor in outgoing_edges[new_vertex_label]
+
+                if (predecessor == successor)    # TODO: correct comparison of ints?
+                    # merging would introduce self-loop => cycle found!
+                    # => put predecessor into preliminary DFVS and remove it from the graph together with the original vertex to be merged
+                    push!(vertices_with_self_loops, predecessor)
+                    remove_predecessor = true
+                    # skip rest of inner for-loop as the predecessor and all its incident edges will be removed anyway
+                    # => no need to add edges that are going to be removed right after
+                    break
+                end
+
+                # edge might be already in the graph, so add_edge! can return false
+                add_edge!(graph, predecessor, successor)
+            end
+
+            # remove merged vertex immediately -> this will change the labels
+            if remove_predecessor
+                # in this case, we do not have to change `init_sol` because potential cycles are broken by adding the predecessor to the dfvs_rr 
+                # and then removing it from the graph
+                # add predecessor to preliminary DFVS, has to be done before calling rem_vertices! because that will change the labels
+                add_vertices_to_dfvs_rr_new!(solution, [predecessor])
+
+                # get original labels of the vertices to be removed
+                orig_label_pred = solution.vmap_new_orig[predecessor]
+
+                # remove merged vertex and predecessor
+                # rem_vertex! swaps the vertex to be removed with the last one and then removes the last vertex
+                swapped_vertex = nv(graph)
+                removed = rem_vertex!(graph, new_vertex_label)
+                if removed
+                    # set new label of the vertex to 0 after removal
+                    solution.vmap_orig_new[vertex_orig] = 0
+                
+                    # update mapping for swapped vertex only if it is not the same as the removed vertex
+                    # -> this is the case if the last vertex in the graph is removed and would then overwrite the mapping to 0 done above
+                    if (swapped_vertex != new_vertex_label)
+                        orig_label_swapped = solution.vmap_new_orig[swapped_vertex]
+                        solution.vmap_orig_new[orig_label_swapped] = new_vertex_label
+                        solution.vmap_new_orig[new_vertex_label] = orig_label_swapped
+                    end
+                    
+                    # shorten mapping new -> orig by removing the last element
+                    # TODO: correct?
+                    pop!(solution.vmap_new_orig)
+                end
+
+                # predecessor might have a new label after the removal above
+                new_label_pred = solution.vmap_orig_new[orig_label_pred]
+                swapped_vertex = nv(graph)
+                removed = rem_vertex!(graph, new_label_pred)
+                if removed
+                    # set new label of the vertex to 0 after removal
+                    solution.vmap_orig_new[orig_label_pred] = 0
+                
+                    # update mapping for swapped vertex only if it is not the same as the removed vertex
+                    # -> this is the case if the last vertex in the graph is removed and would then overwrite the mapping to 0 done above
+                    if (swapped_vertex != new_label_pred)
+                        orig_label_swapped = solution.vmap_new_orig[swapped_vertex]
+                        solution.vmap_orig_new[orig_label_swapped] = new_label_pred
+                        solution.vmap_new_orig[new_label_pred] = orig_label_swapped
+                    end
+                    
+                    # shorten mapping new -> orig by removing the last element
+                    # TODO: correct?
+                    pop!(solution.vmap_new_orig)
+                end
+                
+            else
+                # in this case, we have to add the predecessor to `init_sol` to maintain validity
+                # add predecessor to `init_sol` before removing the vertex as the removal changes the labels once again
+                # `init_sol` contains the original labels of vertices => mapping necessary
+                # get original label of the predecessor
+                orig_label_pred = solution.vmap_new_orig[predecessor]
+                push!(init_sol, orig_label_pred)
+
+                # remove merged vertex
+                # rem_vertex! swaps the vertex to be removed with the last one and then removes the last vertex
+                swapped_vertex = nv(graph)
+                removed = rem_vertex!(graph, new_vertex_label)
+                if removed
+                    # set new label of the vertex to 0 after removal
+                    solution.vmap_orig_new[vertex_orig] = 0
+                
+                    # update mapping for swapped vertex only if it is not the same as the removed vertex
+                    # -> this is the case if the last vertex in the graph is removed and would then overwrite the mapping to 0 done above
+                    if (swapped_vertex != new_vertex_label)
+                        orig_label_swapped = solution.vmap_new_orig[swapped_vertex]
+                        solution.vmap_orig_new[orig_label_swapped] = new_vertex_label
+                        solution.vmap_new_orig[new_vertex_label] = orig_label_swapped
+                    end
+                    
+                    # shorten mapping new -> orig by removing the last element
+                    # TODO: correct?
+                    pop!(solution.vmap_new_orig)
+                end
+
+            end
+        end # for-loop
+
+        # add_vertices_to_dfvs_rr!(solution, vertices_with_self_loops) 
+        
+        # println("Incoming edges: $incoming_edges")
+        # println("Outgoing edges: $outgoing_edges")
+    end 
+
+    # debugging - start
+
+    # merging could introduce self-loops!!
+    # => TODO: during(!) application of reduction rules, check for vertices with self-loops and add them to the FVS
+    # or add them to a preliminary FV set, remove them from the graph and add this set to the FVS found by the following metaheuristic
+    @assert !has_self_loops(graph)    
+
+    # println("Incoming edges: $incoming_edges")
+    # println("Outgoing edges: $outgoing_edges")
+
+    # println("Length of reverse_vmaps_list after merging in-degree = 1: ", length(solution.reverse_vmaps_list))   
+    @debug "Number of vertices before merging indegree = 1: $original_vertex_number"
+    @debug "Number of edges before merging indegree = 1: $original_edge_number"
+    # println("Number of vertices before merging indegree = 1: $original_vertex_number")
+    # println("Number of edges before merging indegree = 1: $original_edge_number")
+    # TODO: number below might not be correct after also checking for self-loops
+    # println("Expected number of vertices after merging indegree = 1: ", original_vertex_number - length(indegree_one))
+    
+    # WRONG: might be fewer edges because the predecessor can already have edges to the successor vertices of the vertex that is merged
+    # println("Expected number of edges after merging indegree = 1: ", original_edge_number - length(indegree_one)) 
+    @debug "Vertex number of merged graph (indegree = 1): $(nv(graph))"
+    @debug "Edge number of merged graph (indegree = 1): $(ne(graph))"
+    # println("Vertex number of merged graph (indegree = 1): ", nv(graph))
+    # println("Edge number of merged graph (indegree = 1): ", ne(graph))  
+
+    # check how vertices are reordered after merging
+    #=
+    for i in 1:length(reverse_vmap)
+        println("Merging: Vertex $i used to be vertex ", reverse_vmap[i])
+    end
+    =#  
+
+    # debugging - end
+
+    return rule_applicable
+
+end # function merge_indegree_one_alternative3_new_lns_init_sol!
+
+
+"""
+    merge_outdegree_one_alternative3_new_lns_init_sol!(solution::DFVSPSolution, init_sol::Vector{Int})
+Merge all vertices with out-degree = 1 with their successor.
+Update mappings of vertex labels in solution.
+Ensure correctness of `init_sol` by replacing a merged vertex with its successor.
+Implementation: get all vertices with out-degree = 1 once in the beginning and remove vertices after each merge 
+    => next vertex to be merged gets new label and has to be mapped to this new label before merging 
+    -> this is done by using the mappings in solution
+    -> could be inefficient
+Steps:
+    - find vertex with out-degree = 1
+    - get list of adjacent vertices
+    - add edges to adjacent vertices to the successor vertex
+    - remove vertex
+"""
+function merge_outdegree_one_alternative3_new_lns_init_sol!(solution::DFVSPSolution, init_sol::Vector{Int})
+    rule_applicable = false
+    
+    # get all vertices with out-degree = 1 once in the beginning and remove vertices after each merge 
+    # => next vertex to be merged gets new label and has to be mapped to this new label before merging -> could be inefficient
+    graph = solution.inst.graph
+    incoming_edges = graph.badjlist
+    outgoing_edges = graph.fadjlist
+
+    # incoming_edges = Base.deepcopy(graph.badjlist)
+    # outgoing_edges = Base.deepcopy(graph.fadjlist)
+
+    # collect all vertices with out-degree = 1 in a vector
+    outdegree_one = [v for v in vertices(graph) if length(outgoing_edges[v]) == 1]
+
+    vertices_with_self_loops = Vector{Int}()
+    # merging_reverse_vmaps = Vector{Vector{Integer}}()
+    # removed_vertices = Set{Int}()
+
+    n = nv(solution.inst.graph)
+    # current label of every vertex is the vertex itself
+    # merging_vmap = collect(1:n)
+
+
+    # debugging - start
+
+    # println("Incoming edges: $incoming_edges")
+    # println("Outgoing edges: $outgoing_edges")
+
+    original_vertex_number = nv(graph)
+    original_edge_number = ne(graph) 
+    
+    @debug "Number of vertices with outdegree = 1: $(length(outdegree_one))"
+    # println("Vertices with outdegree = 1: ", length(outdegree_one))   
+
+    #= 
+    for x in outdegree_one
+        # println("Vertex to merge: $x")
+    end 
+
+    if (!isempty(outdegree_one))
+        to_merge = outdegree_one[1]
+        println("Before merge, outdegree = 1: Graph contains vertex $to_merge: ", has_vertex(graph, to_merge))
+    end 
+     =#
+
+    # debugging - end   
+
+    # store vertex mapping in solution
+    # in the end, these mappings are needed to determine the original vertex label of the vertices in the feedback set
+    if (!isempty(outdegree_one))
+        rule_applicable = true
+
+        # Sort the vertices to be merged -> TODO: necessary?
+        vertices_to_merge = sort(outdegree_one)
+
+        # build list of original labels of the vertices to be merged
+        vertices_to_merge_orig_labels = Vector{Int}()
+        for vertex in vertices_to_merge
+            orig_label = solution.vmap_new_orig[vertex]
+            push!(vertices_to_merge_orig_labels, orig_label)
+        end
+
+        # merge_vertices! from Graphs merges the vertices in the given list to the vertex with the lowest number
+        # BUT: merge_vertices! Supports [`SimpleGraph`](@ref) only.
+        # => own implementation necessary!
+        # Traverse the list of vertices and add all their outgoing edges to their predecessor
+        for vertex_orig in vertices_to_merge_orig_labels
+
+            remove_successor = false
+
+            new_vertex_label = solution.vmap_orig_new[vertex_orig]
+
+            # check if vertex has already been removed in another iteration            
+            if (new_vertex_label == 0)
+                # println("SKIP: already removed")
+                continue
+            end
+            
+            # println("Number of vertices in graph: ", nv(graph))
+            # println("Length of outgoing_edges list: ", length(outgoing_edges))
+
+            # check if successor has already been removed in another iteration => out-degree = 0 which will be caught by another reduction rule
+            if isempty(outgoing_edges[new_vertex_label])
+                # println("SKIP: no outgoing neighbor")
+                continue
+            end
+
+            successor = first(outgoing_edges[new_vertex_label])
+            for predecessor in incoming_edges[new_vertex_label]
+
+                if (successor == predecessor)    # TODO: correct comparison of ints?
+                    # merging would introduce self-loop => cycle found!
+                    # => put successor into preliminary DFVS and remove it from the graph together with the original vertex to be merged
+                    push!(vertices_with_self_loops, successor)
+                    remove_successor = true
+                    # skip rest of inner for-loop as the successor and all its incident edges will be removed anyway
+                    # => no need to add edges that are going to be removed right after
+                    break
+                end
+
+                # edge might be already in the graph, so add_edge! can return false
+                add_edge!(graph, predecessor, successor)
+            end
+
+            # remove merged vertex immediately -> this will change the labels
+            if remove_successor
+                # in this case, we do not have to change `init_sol` because potential cycles are broken by adding the successor to the dfvs_rr 
+                # and then removing it from the graph
+                # add successor to preliminary DFVS, has to be done before calling rem_vertices! because that will change the labels
+                add_vertices_to_dfvs_rr_new!(solution, [successor])
+
+                # get original labels of the vertices to be removed
+                orig_label_succ = solution.vmap_new_orig[successor]
+
+                # remove merged vertex and successor
+                # rem_vertex! swaps the vertex to be removed with the last one and then removes the last vertex
+                swapped_vertex = nv(graph)
+                removed = rem_vertex!(graph, new_vertex_label)
+                if removed
+                    # set new label of the vertex to 0 after removal
+                    solution.vmap_orig_new[vertex_orig] = 0
+                
+                    # update mapping for swapped vertex only if it is not the same as the removed vertex
+                    # -> this is the case if the last vertex in the graph is removed and would then overwrite the mapping to 0 done above
+                    if (swapped_vertex != new_vertex_label)
+                        orig_label_swapped = solution.vmap_new_orig[swapped_vertex]
+                        solution.vmap_orig_new[orig_label_swapped] = new_vertex_label
+                        solution.vmap_new_orig[new_vertex_label] = orig_label_swapped
+                    end
+                    
+                    # shorten mapping new -> orig by removing the last element
+                    # TODO: correct?
+                    pop!(solution.vmap_new_orig)
+                end
+
+                # successor might have a new label after the removal above
+                new_label_succ = solution.vmap_orig_new[orig_label_succ]
+                swapped_vertex = nv(graph)
+                removed = rem_vertex!(graph, new_label_succ)
+                if removed
+                    # set new label of the vertex to 0 after removal
+                    solution.vmap_orig_new[orig_label_succ] = 0
+                
+                    # update mapping for swapped vertex only if it is not the same as the removed vertex
+                    # -> this is the case if the last vertex in the graph is removed and would then overwrite the mapping to 0 done above
+                    if (swapped_vertex != new_label_succ)
+                        orig_label_swapped = solution.vmap_new_orig[swapped_vertex]
+                        solution.vmap_orig_new[orig_label_swapped] = new_label_succ
+                        solution.vmap_new_orig[new_label_succ] = orig_label_swapped
+                    end
+                    
+                    # shorten mapping new -> orig by removing the last element
+                    # TODO: correct?
+                    pop!(solution.vmap_new_orig)
+                end
+
+            else
+                # in this case, we have to add the successor to `init_sol` to maintain validity
+                # add successor to `init_sol` before removing the vertex as the removal changes the labels once again
+                # `init_sol` contains the original labels of vertices => mapping necessary
+                # get original label of the successor
+                orig_label_succ = solution.vmap_new_orig[successor]
+                push!(init_sol, orig_label_succ)
+
+                # remove merged vertex
+                # rem_vertex! swaps the vertex to be removed with the last one and then removes the last vertex
+                swapped_vertex = nv(graph)
+                removed = rem_vertex!(graph, new_vertex_label)
+                if removed
+                    # set new label of the vertex to 0 after removal
+                    solution.vmap_orig_new[vertex_orig] = 0
+                
+                    # update mapping for swapped vertex only if it is not the same as the removed vertex
+                    # -> this is the case if the last vertex in the graph is removed and would then overwrite the mapping to 0 done above
+                    if (swapped_vertex != new_vertex_label)
+                        orig_label_swapped = solution.vmap_new_orig[swapped_vertex]
+                        solution.vmap_orig_new[orig_label_swapped] = new_vertex_label
+                        solution.vmap_new_orig[new_vertex_label] = orig_label_swapped
+                    end
+                    
+                    # shorten mapping new -> orig by removing the last element
+                    # TODO: correct?
+                    pop!(solution.vmap_new_orig)
+                end
+
+            end
+        end # for-loop
+
+        # add_vertices_to_dfvs_rr!(solution, vertices_with_self_loops) 
+        
+        # println("Incoming edges: $incoming_edges")
+        # println("Outgoing edges: $outgoing_edges")
+    end 
+
+    # debugging - start
+
+    # merging could introduce self-loops!!
+    # => TODO: during(!) application of reduction rules, check for vertices with self-loops and add them to the FVS
+    # or add them to a preliminary FV set, remove them from the graph and add this set to the FVS found by the following metaheuristic
+    @assert !has_self_loops(graph)    
+
+    # println("Incoming edges: $incoming_edges")
+    # println("Outgoing edges: $outgoing_edges")
+
+    # println("Length of reverse_vmaps_list after merging out-degree = 1: ", length(solution.reverse_vmaps_list))   
+    @debug "Number of vertices before merging outdegree = 1: $original_vertex_number"
+    @debug "Number of edges before merging outdegree = 1: $original_edge_number"
+    # println("Number of vertices before merging outdegree = 1: $original_vertex_number")
+    # println("Number of edges before merging outdegree = 1: $original_edge_number")
+    # TODO: number below might not be correct after also checking for self-loops
+    # println("Expected number of vertices after merging outdegree = 1: ", original_vertex_number - length(outdegree_one))
+    
+    # WRONG: might be fewer edges because the predecessor can already have edges to the successor vertices of the vertex that is merged
+    # println("Expected number of edges after merging outdegree = 1: ", original_edge_number - length(outdegree_one)) 
+    @debug "Vertex number of merged graph (outdegree = 1): $(nv(graph))"
+    @debug "Edge number of merged graph (outdegree = 1): $(ne(graph))"
+    # println("Vertex number of merged graph (outdegree = 1): ", nv(graph))
+    # println("Edge number of merged graph (outdegree = 1): ", ne(graph))  
+
+    # check how vertices are reordered after merging
+    #=
+    for i in 1:length(reverse_vmap)
+        println("Merging: Vertex $i used to be vertex ", reverse_vmap[i])
+    end
+    =#  
+
+    # debugging - end
+
+    return rule_applicable
+
+end # function merge_outdegree_one_alternative3_new_lns_init_sol!
+
+
 
 """
     compute_indegree_outdegree_difference(vertex::T, graph::SimpleDiGraph{Int}) where {T <: Integer}
@@ -2720,6 +3281,458 @@ function mtz_formulation_reduced!(solution::DFVSPSolution)
 
 
 end # function mtz_formulation_reduced!
+
+
+# Helper functions for CEC formulation #####################################################
+
+
+function extend_clique(g::Graph, vs::Vector{Int64})::Vector{Int64}
+    ns = intersect([neighbors(g, v) for v in vs]...)
+    gsub,vmap = induced_subgraph(g, ns)
+    if nv(gsub) == 0
+      return vs
+    elseif ne(gsub) == 0
+      return vcat(vs, [vmap[1]])
+    end
+    (x, e) = findmax(Dict(e => length(intersect(neighbors(gsub, src(e)), neighbors(gsub, dst(e))))
+                          for e in edges(gsub)))
+    return vcat(vs, [vmap[v] for v in extend_clique(gsub, [src(e), dst(e)])])
+end # function extend_clique
+
+function extract_cycles(g::DiGraph, fast_mode=false)::Vector{Vector{Int64}}
+    sccs = strongly_connected_components(g)
+    cycs = Vector{Int64}[]
+    for scc in sccs
+      if length(scc) >= 2
+        gscc,vmap = induced_subgraph(g, scc)
+        n_it = fast_mode ? 1 : length(vmap)
+        for v in 1:n_it
+          v = rand(1:length(vmap))
+          sp = dijkstra_shortest_paths(gscc, [v;])
+          cycs_vmap = []
+          for w in inneighbors(gscc, v)
+            if sp.pathcounts[w] >= 1
+              push!(cycs_vmap, enumerate_paths(sp, w))
+              push!(cycs, [vmap[u] for u in enumerate_paths(sp, w)])
+            end
+          end
+        end
+      end
+    end
+    return cycs
+end # function extract_cycles
+
+
+# CEC formulation SCIP #####################################################################
+
+
+mutable struct NoCycleCH <: SCIP.AbstractConstraintHandler
+    scip::SCIP.Optimizer
+end
+
+# Constraint data, referencing variables of a single constraint.
+mutable struct NoCycleCons <: SCIP.AbstractConstraint{NoCycleCH}
+    g::DiGraph{Int64}
+    vars::Vector{MOI.VariableIndex}
+    stop_time::Float64
+end
+
+# Helper function used in several callbacks
+function get_cycles(ch, constraints, sol=C_NULL)
+    all_cycs = []
+    for cons_::Ptr{SCIP.SCIP_CONS} in constraints
+      cons::NoCycleCons = SCIP.user_constraint(cons_)
+
+      # extract solution values
+      values = SCIP.sol_values(ch.scip, cons.vars, sol)
+      vs = [v for v in vertices(cons.g) if values[v] >= 1 - 1e-6]
+
+      # find cycles in the supposedly dag
+      gdag,vmap = induced_subgraph(cons.g, vs)
+      cycs1 = extract_cycles(gdag, time() >= cons.stop_time)
+      append!(all_cycs, [[cons.vars[vmap[v]] for v in cyc] for cyc in cycs1])
+    end
+    return all_cycs
+end # function get_cycles
+
+
+function SCIP.check(ch::NoCycleCH, constraints, sol, checkintegrality, checklprows, printreason, completely)
+    if isempty(get_cycles(ch, constraints, sol))
+      return SCIP.SCIP_FEASIBLE
+    else
+      return SCIP.SCIP_INFEASIBLE
+    end
+end
+
+function enforce(ch::NoCycleCH, constraints)
+    cycs = get_cycles(ch, constraints)
+    for cyc in cycs
+      terms = [MOI.ScalarAffineTerm(1.0, vi) for vi in cyc]
+      MOI.add_constraint(ch.scip, MOI.ScalarAffineFunction(terms, 0.0), MOI.LessThan(length(cyc) - 1.0))
+    end
+    if isempty(cycs)
+      return SCIP.SCIP_FEASIBLE
+    else
+      return SCIP.SCIP_CONSADDED
+    end
+end
+
+function SCIP.enforce_lp_sol(ch::NoCycleCH, constraints, nusefulconss, solinfeasible)
+    return enforce(ch, constraints)
+end
+
+function SCIP.enforce_pseudo_sol(ch::NoCycleCH, constraints, nusefulconss, solinfeasible, objinfeasible)
+    return enforce(ch, constraints)
+end
+
+function SCIP.lock(ch::NoCycleCH, constraint, locktype, nlockspos, nlocksneg)
+    cons::NoCycleCons = SCIP.user_constraint(constraint)
+
+    for vi in cons.vars
+      var_::Ptr{SCIP.SCIP_VAR} = SCIP.var(ch.scip, vi)
+      var_ != C_NULL || continue  # avoid segfault!
+
+      SCIP.@SCIP_CALL SCIP.SCIPaddVarLocksType(
+        ch.scip, var_, locktype, nlocksneg, nlockspos)
+    end
+end
+
+
+"""
+    cec_formulation_scip!(solution::DFVSPSolution; init_sol::BitSet = BitSet(vertices(g)))
+
+Build and solve a MILP model for the DFVSP using the CEC (cycle elimination constraints) formulation.
+Use the model to repair the given solution to be valid again.
+Optional argument `init_sol` is to set an initial solution for the model. If no initial solution is
+    given, it simply uses all vertices of the graph.
+"""
+function cec_formulation_scip!(solution::DFVSPSolution; init_sol::BitSet = BitSet(vertices(solution.inst.graph)))
+    enter_time = time()
+    
+    # get times and compute time limit for solver
+    # also check termination criterion based on time
+    # global_start_time = MyUtils.global_start_time
+    # global_run_time_limit = MyUtils.global_run_time_limit
+
+    # start with 60 seconds
+    solver_time_limit = first_time_limit_mip_solver
+    elapsed_time = time() - global_start_time
+
+    if (global_run_time_limit < 0)
+        # no global time limit set, so just continue
+    elseif (elapsed_time >= global_run_time_limit)
+        # run time limit already exceeded
+
+        # TODO: return biggest solution possible (as done below) or just set solver time to 0? -> should be the same outcome?
+        # => return all vertices of the graph as solution to avoid returning an invalid solution
+        @debug "MIP solving: Global run time limit exceeded."
+        # do not clear the current DFVS as it can contain also other vertices that are not part of the graph at hand
+        # clear_dfvs!(solution)
+        # there should be no overlap between the graph vertices and vertices already contained in the DFVS
+        all_vertices = collect(vertices(solution.inst.graph))
+        add_vertices_to_solution_new!(solution, all_vertices)
+
+        return
+    else
+        remaining_time = (global_run_time_limit - elapsed_time)
+        # set solver time limit to the smaller one of 60 seconds and the remaining time
+        solver_time_limit = min(solver_time_limit, remaining_time)
+
+        @debug "Remaining run time = $remaining_time"
+        @debug "First solver time limit = $solver_time_limit"
+    end
+
+
+    # verbosity level of output -> [type: int, advanced: FALSE, range: [0,5], default: 4]
+    # maximal time in seconds to run -> [type: real, advanced: FALSE, range: [0,1e+20], default: 1e+20]
+    # set max memory usage in MB, type = real, range: [0,8796093022207], default: 8796093022207]
+    optimizer = SCIP.Optimizer(display_verblevel=0, limits_time=solver_time_limit, limits_memory=4000)
+
+    g = solution.inst.graph
+
+    # add binary variables for vertices
+    y = MOI.add_variables(optimizer, nv(g))
+    MOI.add_constraint.(optimizer, y, MOI.ZeroOne())
+
+    # objective: minimize number of vertices in the DFVS
+    # if variable value = 1 => vertex is in DAG but not in DFVS
+    # if variable value = 0 => vertex is in DFVS and not in DAG
+    MOI.set(optimizer, MOI.ObjectiveFunction{MOI.ScalarAffineFunction{Float64}}(),
+        MOI.ScalarAffineFunction(MOI.ScalarAffineTerm{Float64}.(-1, y), 1.0 * nv(g)))
+    MOI.set(optimizer, MOI.ObjectiveSense(), MOI.MIN_SENSE)
+
+    # constraints for all 2-cycles
+    cyc2 = [e for e in edges(g) if src(e) < dst(e) && has_edge(g, dst(e), src(e))]
+    gcyc2 = SimpleGraphFromIterator(cyc2)
+    for e in cyc2
+      clique = extend_clique(gcyc2, [src(e), dst(e)])
+      MOI.add_constraint(optimizer,
+                         MOI.ScalarAffineFunction(MOI.ScalarAffineTerm.(1.0, y[clique]), 0.0),
+                         MOI.LessThan(1.0))
+    end
+
+    # constraints for cycle elimination
+    nocycch = NoCycleCH(optimizer)
+    SCIP.include_conshdlr(optimizer, nocycch; needs_constraints=true)
+
+    cons = NoCycleCons(g, y, enter_time + solver_time_limit)
+    SCIP.add_constraint(optimizer, nocycch, cons)
+
+    # set initial solution
+    MOI.set.(optimizer, MOI.VariablePrimalStart(), y,
+        [v in init_sol ? 0.0 : 1.0 for v in vertices(g)])
+
+
+    MOI.optimize!(optimizer)
+
+
+    # TODO: show solution
+    # println(solution_summary(model))
+
+    # check termination status using an optimizer instead of a model:
+    status = MOI.get(optimizer, MOI.TerminationStatus())
+
+    # recommended workflow
+    if status == MOI.OPTIMAL
+        # println("Solution is optimal")
+    elseif status == MOI.TIME_LIMIT && (MOI.get(optimizer, MOI.ResultCount()) >= 1)
+        # println("Solution is suboptimal due to a time limit, but a primal solution is available")
+    elseif status == MEMORY_LIMIT && (MOI.get(optimizer, MOI.ResultCount()) >= 1)
+        # println("Solution is suboptimal due to a memory limit, but a primal solution is available")
+    elseif status == MOI.INTERRUPTED && (MOI.get(optimizer, MOI.ResultCount()) >= 1)
+        # println("Solution is suboptimal due to an interrupt, but a primal solution is available")
+
+        # after an interrupt, we should terminate -> get solution and return
+
+        # build new solution from model
+        yvalue = MOI.get(optimizer, MOI.VariablePrimal(), y)
+        # collect vertices for solution in a list
+        solution_vertices = Vector{Int}()
+        # all variables y_v with value 1 are part of the DAG => NOT part of the solution
+        # all variables y_v with value 0 are not part of the DAG => part of the solution
+        for v in vertices(g)
+            # if (value(y[i]) == 0)   # TODO correct check for value 0 of a binary decision variable?
+            if (isapprox(yvalue[v], 0, atol = 1e-1))  # check for value 0 with a certain tolerance
+                push!(solution_vertices, v)
+            end
+        end
+
+        # alternative?
+        # solution_vertices = [i for i in 1:n_original if (value(y[i]) == 0)]
+
+        # add vertices to the solution
+        add_vertices_to_solution_new!(solution, solution_vertices)
+
+        return
+    else
+        # println("No solution found.")
+
+        # to avoid an error or crash, simply return
+        # => return all vertices of the graph as solution to avoid returning an invalid solution
+        @debug "MIP solving: unknown error."
+        # do not clear the current DFVS as it can contain also other vertices that are not part of the graph at hand
+        # clear_dfvs!(solution)
+        # there should be no overlap between the graph vertices and vertices already contained in the DFVS
+        all_vertices = collect(vertices(solution.inst.graph))
+        add_vertices_to_solution_new!(solution, all_vertices)
+
+        return
+
+        #= 
+        # check for conflicts in the model and constraints
+        compute_conflict!(optimizer)
+        if MOI.get(optimizer, MOI.ConflictStatus()) != MOI.CONFLICT_FOUND
+            error("No conflict could be found for an infeasible model.")
+        end
+
+        # collect conflicting constraints and print them
+        # TODO: how to do this if no model is available but only an optimizer?
+        # conflict_constraint_list = ConstraintRef[]
+        # for (F, S) in list_of_constraint_types(model)
+        #     for con in all_constraints(model, F, S)
+        #         if MOI.get(model, MOI.ConstraintConflictStatus(), con) == MOI.IN_CONFLICT
+        #             push!(conflict_constraint_list, con)
+        #             println(con)
+        #         end
+        #     end
+        # end
+
+        error("The model was not solved correctly.")
+        =#
+    end
+
+    # println("  objective value = ", MOI.get(optimizer, MOI.ObjectiveValue()))
+    if MOI.get(optimizer, MOI.PrimalStatus()) == MOI.FEASIBLE_POINT
+        # -> large output for large graphs/models
+        # println("  primal solution: y = ", MOI.get(optimizer, MOI.VariablePrimal(), y))
+    end
+    if MOI.get(optimizer, MOI.DualStatus()) == MOI.FEASIBLE_POINT
+       # println("  dual solution: c1 = ", MOI.get(optimizer, MOI.ConstraintDual()))
+    end
+
+    # resume solving if necessary:
+
+    elapsed_time = time() - global_start_time
+
+    # global run time limit is set and already exceeded
+    if ((global_run_time_limit > 0) && (elapsed_time >= global_run_time_limit))
+        # continue below
+
+    elseif status == MOI.TIME_LIMIT
+        # global run time limit not set or not exceeded yet
+        # apply gap limit only if solving was terminated because of exceeded time limit; remove/increase time limit
+        # @info "Time limit for solving was exceeded, now continue solving with gap limit and higher time limit"
+
+        # TODO maybe do not completely remove time limit but set it to a higher value and still consider global run time limit
+        # start with 300 seconds = 5 minutes
+        solver_time_limit = second_time_limit_mip_solver
+
+        if (global_run_time_limit < 0)
+            # no global time limit set, so just continue
+        else
+            remaining_time = (global_run_time_limit - elapsed_time)
+            # set solver time limit to the smaller one of 300 seconds and the remaining time
+            solver_time_limit = min(solver_time_limit, remaining_time)
+
+            @debug "Remaining run time = $remaining_time"
+            @debug "Second solver time limit = $solver_time_limit"
+        end
+
+        MOI.set(optimizer, MOI.RawOptimizerAttribute("limits/time"), solver_time_limit)
+        cons.stop_time = enter_time + solver_time_limit
+        MOI.set(optimizer, MOI.RawOptimizerAttribute("limits/gap"), 0.005)
+
+        # continue optimization
+        MOI.optimize!(optimizer)
+
+
+        # TODO: show solution
+        # println(solution_summary(model))
+
+        # check termination status using an optimizer instead of a model:
+        status = MOI.get(optimizer, MOI.TerminationStatus())
+
+        # recommended workflow
+        if status == MOI.OPTIMAL
+            # println("Solution is optimal")
+        elseif status == MOI.TIME_LIMIT && (MOI.get(optimizer, MOI.ResultCount()) >= 1)
+            # println("Solution is suboptimal due to a time limit, but a primal solution is available")
+        elseif status == MEMORY_LIMIT && (MOI.get(optimizer, MOI.ResultCount()) >= 1)
+            # println("Solution is suboptimal due to a memory limit, but a primal solution is available")
+        elseif status == MOI.INTERRUPTED && (MOI.get(optimizer, MOI.ResultCount()) >= 1)
+            # println("Solution is suboptimal due to an interrupt, but a primal solution is available")
+
+            # after an interrupt, we should terminate -> get solution and return
+
+            # build new solution from model
+            yvalue = MOI.get(optimizer, MOI.VariablePrimal(), y)
+            # collect vertices for solution in a list
+            solution_vertices = Vector{Int}()
+            # all variables y_v with value 1 are part of the DAG => NOT part of the solution
+            # all variables y_v with value 0 are not part of the DAG => part of the solution
+            for v in vertices(g)
+                # if (value(y[i]) == 0)   # TODO correct check for value 0 of a binary decision variable?
+                if (isapprox(yvalue[v], 0, atol = 1e-1))  # check for value 0 with a certain tolerance
+                    push!(solution_vertices, v)
+                end
+            end
+
+            # alternative?
+            # solution_vertices = [i for i in 1:n_original if (value(y[i]) == 0)]
+
+            # add vertices to the solution
+            add_vertices_to_solution_new!(solution, solution_vertices)
+
+            return
+        else
+            # println("No solution found.")
+
+            # to avoid an error or crash, simply return
+            # => return all vertices of the graph as solution to avoid returning an invalid solution
+            @debug "MIP solving: unknown error."
+            # do not clear the current DFVS as it can contain also other vertices that are not part of the graph at hand
+            # clear_dfvs!(solution)
+            # there should be no overlap between the graph vertices and vertices already contained in the DFVS
+            all_vertices = collect(vertices(solution.inst.graph))
+            add_vertices_to_solution_new!(solution, all_vertices)
+
+            return
+
+            #= 
+            # check for conflicts in the model and constraints
+            compute_conflict!(optimizer)
+            if MOI.get(optimizer, MOI.ConflictStatus()) != MOI.CONFLICT_FOUND
+                error("No conflict could be found for an infeasible model.")
+            end
+
+            # collect conflicting constraints and print them
+            # TODO: how to do this if no model is available but only an optimizer?
+            # conflict_constraint_list = ConstraintRef[]
+            # for (F, S) in list_of_constraint_types(model)
+            #     for con in all_constraints(model, F, S)
+            #         if MOI.get(model, MOI.ConstraintConflictStatus(), con) == MOI.IN_CONFLICT
+            #             push!(conflict_constraint_list, con)
+            #             println(con)
+            #         end
+            #     end
+            # end
+
+            error("The model was not solved correctly.")
+            =#
+        end
+
+        # println("  objective value = ", MOI.get(optimizer, MOI.ObjectiveValue()))
+        if MOI.get(optimizer, MOI.PrimalStatus()) == MOI.FEASIBLE_POINT
+            # -> large output for large graphs/models
+            # println("  primal solution: y = ", MOI.get(optimizer, MOI.VariablePrimal(), y))
+        end
+        if MOI.get(optimizer, MOI.DualStatus()) == MOI.FEASIBLE_POINT
+           # println("  dual solution: c1 = ", MOI.get(optimizer, MOI.ConstraintDual()))
+        end
+    end
+
+    # debugging - start
+
+    # why did the solver stop:
+    # @info "Termination status: $status"
+    # println("Termination status: ", termination_status(model))
+    # solver-specific string for reason:
+    # @info "Solver-specific reason for termination: $(MOI.get(optimizer, MOI.RawStatusString()))"
+    # println("Solver-specific reason for termination: ", raw_status(model))
+
+    # show the objective value
+    # @info "Objective value: $(MOI.get(optimizer, MOI.ObjectiveValue()))"
+    # println("Objective value: ", objective_value(model))
+
+    # get primal solution for vertices by broadcasting
+    # -> large output for large graphs/models
+    # println("Primal solution for vertices: ", MOI.get(optimizer, MOI.VariablePrimal(), y))
+
+
+    # debugging - end
+
+
+    # build new solution from model
+    yvalue = MOI.get(optimizer, MOI.VariablePrimal(), y)
+    # collect vertices for solution in a list
+    solution_vertices = Vector{Int}()
+    # all variables y_v with value 1 are part of the DAG => NOT part of the solution
+    # all variables y_v with value 0 are not part of the DAG => part of the solution
+    # for v in vertices(g)
+    #     if (yvalue[v] <= 1e-5)
+    #         push!(solution_vertices, v)
+    #     end
+    # end
+
+    # alternative
+    # solution_vertices = [v for v in vertices(g) if (yvalue[v] <= 1e-5)]
+    solution_vertices = [v for v in vertices(g) if (isapprox(yvalue[v], 0, atol = 1e-1))]
+
+    # add vertices to the solution
+    add_vertices_to_solution_new!(solution, solution_vertices)
+
+
+end # function cec_formulation_scip!
 
 
 
@@ -3857,6 +4870,9 @@ function repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_form
     # objective value has changed, solution should be valid
     invalidate!(sol)
 
+    # update global best solution
+    update_global_best_solution_current_part(sol.x)
+
     # debugging - start
 
     @debug "Repair method: length of starting solution = $current_sol_length"
@@ -3871,6 +4887,228 @@ function repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_form
     # debugging - end
 
 end # function repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_formulation_reduced_using_has_path_multi_src_multi_dest_and_selfloop_removal!
+
+
+"""
+    destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!(sol::DFVSPSolution, (par, k)::Tuple{Int, Int}, result::Result)
+
+Destroy operator for LNS selects par*ALNS.get_number_to_destroy elements according to the indegree-outdegree heuristic for removal from solution.
+    To enable usage of the selected elements as initial solution in the repair method, the removal is actually done in the corresponding repair method.
+    In this destroy method, the elements to destroy are only selected and moved to the end of the solution.
+
+Tournament selection is used to as the selection method using parameter `k` to determine the tournament size.
+    - `k` gives the number of elements to be used in the tournament
+    - tournament_size = k
+In each tournament, the element with the smallest heuristic value is selected.
+
+Should be used together with `repair_dag_reduction_rules_cec_formulation_init_sol!()`.
+
+"""
+function destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!(sol::DFVSPSolution, (par, k)::Tuple{Int, Int}, result::Result)
+    current_sol = sol.x
+    current_sol_length = length(current_sol)
+    # get_number_to_destroy selects a number based on the given number of elements in the solution and the ratio given in the ALNS settings
+    num_to_destroy = min(get_number_to_destroy(current_sol_length) * par, current_sol_length)
+
+    # build a dictionary of solution-vertices => heuristic value (using the current label of the vertices in the heuristic)
+    dict_vertex_hvalue = Dict(i => compute_indegree_outdegree_difference(sol.vmap_orig_new[i], sol.inst.graph) for i in current_sol)
+
+    selected_vertices_set = Set{Int}()
+    population = Set(copy(current_sol))
+    tournament_size = k
+
+    # use tournament selection to choose the vertices
+    for i in 1:num_to_destroy
+
+        # ensure that the tournament size is not bigger than the population
+        # this is unlikely but could be the case after deleting the selected vertices in previous tournaments
+        if tournament_size > length(population)
+            # reduce tournament_size until sampling is possible
+            while (tournament_size > length(population))
+                tournament_size -= 1
+            end
+        end
+
+        # select tournament_size many vertices as candidates
+        # TODO? this will throw an error if tournament_size is negative (which should not happen unless the population is empty)
+        # sample() works with arrays not sets, so population has to be converted
+        tournament_selection = sample(collect(population), tournament_size, replace=false)
+        # println("size of tournament: ", length(tournament_selection))
+        # sort the vertices by their heuristic value in increasing order
+        tournament_selection_sorted = sort(tournament_selection, by= x -> dict_vertex_hvalue[x])
+        # select the first vertex = the vertex with the smallest heuristic value
+        selected_vertex = first(tournament_selection_sorted)
+        # add the selected vertex to the set
+        push!(selected_vertices_set, selected_vertex)
+        # remove the selected vertex from the population to avoid multiple selections of a single vertex
+        population_length_old = length(population)
+        delete!(population, selected_vertex)
+        population_length_new = length(population)
+
+        # ensure correct deletion of vertex from population
+        @assert population_length_new < population_length_old
+
+    end
+
+    current_sol_set = Set(current_sol)
+
+    # first delete the selected elements from the solution
+    new_sol_set = setdiff(current_sol_set, selected_vertices_set)
+    # then add the selected elements to the end of the solution, so that they can be found in the repair method
+    new_sol_vector = sort!(collect(new_sol_set))
+    append!(new_sol_vector, collect(selected_vertices_set))
+
+    sol.x = copy(new_sol_vector)
+    sol.sel -= num_to_destroy
+    # objective value has changed, solution is probably invalid
+    invalidate!(sol)
+
+    # debugging - start
+
+    @debug "Destroy method: length of starting solution = $current_sol_length"
+    @debug "Destroy method: number of destroyed elements = $num_to_destroy"
+    @debug "Destroy method: length of resulting solution = $(length(sol.x))"
+    @debug "Destroy method: number of selected elements in solution = $(sol.sel)"
+    # println("")
+    # println("Destroy method: length of starting solution = ", current_sol_length)
+    # println("Destroy method: number of destroyed elements = ", num_to_destroy)
+    # println("Destroy method: length of resulting solution = ", length(sol.x))
+    # println("Destroy method: number of selected elements in solution = ", sol.sel)
+    # println("")
+
+    # debugging - end
+
+end # function destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!
+
+
+"""
+    repair_dag_reduction_rules_cec_formulation_init_sol!(sol::DFVSPSolution, par::Int, result::Result)
+
+Repair operator for LNS uses the CEC MILP formulation to solve the DFVS subproblem on the graph resulting from the previous destroy method.
+    Uses reduction rules to decrease the graph size before calling the MILP model.
+    Use the partial destruction from the destroy method to call the MILP model with an initial solution.
+
+Should be used together with `destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!()`.
+"""
+function repair_dag_reduction_rules_cec_formulation_init_sol!(sol::DFVSPSolution, par::Int, result::Result)
+    # check for termination
+    if (check_lns_termination(sol))
+        return
+    end
+
+    # get initial solution for CEC formulation and remove these elements from the solution to finish the destruction
+    actual_sol = sol.x[begin:sol.sel]
+    cec_init_sol_orig_labels = sol.x[(sol.sel + 1):end]
+    sol.x = copy(actual_sol)
+
+    @debug "Repair method: Length of actual sol = $(length(actual_sol))"
+    @debug "Repair method: Length of modified sol = $(length(sol.x))"
+    @debug "Repair method: Length of cec init sol orig labels = $(length(cec_init_sol_orig_labels))"
+    @debug "Repair method: Number of selected elements = $(sol.sel)"
+
+    current_sol = sol.x
+    current_sol_length = length(current_sol)
+
+    solution_copy = copy(sol)   # only copies reference to instance with graph
+    graph_copy = SimpleDiGraph(sol.inst.graph)
+    solution_copy.inst = DFVSPInstance(graph_copy)
+    # solution_copy.inst.graph = graph_copy
+
+    # remove vertices that are currently part of the solution from the graph
+    # x (= solution) contains the original labels of the vertices -> mapping has to be used
+    new_labels_to_remove = Vector{Int}()
+    for orig_label in solution_copy.x
+        new_label = solution_copy.vmap_orig_new[orig_label]
+        push!(new_labels_to_remove, new_label)
+    end
+
+    reverse_vmap = rem_vertices!(graph_copy, new_labels_to_remove)
+
+    # update vertex mappings
+    # create temporary mapping of correct new length
+    # the old mapping in solution is needed for the update and cannot be changed directly
+    # temp_vmap_new_orig = Vector{Integer}(length(reverse_vmap))
+    temp_vmap_new_orig = zeros(Integer, length(reverse_vmap))
+    for i in 1:length(temp_vmap_new_orig)
+        # update original label
+        original_label = solution_copy.vmap_new_orig[reverse_vmap[i]]
+        temp_vmap_new_orig[i] = original_label
+        # update new label
+        solution_copy.vmap_orig_new[original_label] = i
+    end
+    # store new mapping in solution
+    solution_copy.vmap_new_orig = copy(temp_vmap_new_orig)
+
+    # empty out the rr solution set
+    solution_copy.dfvs_rr = Vector{Int}()
+    # apply reduction rules to enlarged DAG, but do not consider any further splitting into SCCs
+    # println("Vertex number of enlarged DAG before RRs: $(nv(graph_copy))")
+    # println("Edge number of enlarged DAG before RRs: $(ne(graph_copy))")
+    @debug "Repair method: Vertex number of enlarged DAG before RRs: $(nv(graph_copy))"
+    @debug "Repair method: Edge number of enlarged DAG before RRs: $(ne(graph_copy))"
+
+    # apply reduction rules that maintain the validity of cec_init_sol
+    apply_reduction_rules_new_lns_init_sol!(solution_copy, cec_init_sol_orig_labels)
+    # remove possible duplicates
+    unique!(cec_init_sol_orig_labels)
+    # get solution from application of reduction rules
+    rr_solution = copy(solution_copy.dfvs_rr)
+
+    # println("Vertex number of enlarge DAG after RRs: $(nv(graph_copy))")
+    # println("Edge number of enlarged DAG before RRs: $(ne(graph_copy))")
+    @debug "Repair method: Vertex number of enlarged DAG after RRs: $(nv(graph_copy))"
+    @debug "Repair method: Edge number of enlarged DAG after RRs: $(ne(graph_copy))"
+    @debug "Repair method: Solution from reduction rules for enlarged DAG: $rr_solution"
+    # println("solution from reduction rules: $rr_solution")
+
+    # build initial solution for CEC formulation
+    # we have the original labels and have to use the mapping to get the new labels in the DAG
+    # cec_init_sol_current_labels = [solution_copy.vmap_orig_new[orig_label] for orig_label in cec_init_sol_orig_labels if (solution_copy.vmap_orig_new[orig_label] != 0)]
+    cec_init_sol_current_labels = [solution_copy.vmap_orig_new[orig_label] for orig_label in cec_init_sol_orig_labels]
+    @debug "Repair method: Length of cec init sol current labels = $(length(cec_init_sol_current_labels))"
+    filter!(!iszero, cec_init_sol_current_labels)
+    @debug "Repair method: Length of cec init sol current labels after filtering = $(length(cec_init_sol_current_labels))"
+
+    cec_init_sol = BitSet(cec_init_sol_current_labels)
+    @debug "Repair method: Length of initial solution = $(length(cec_init_sol))"
+
+    # call model with CEC formulation of DFVSP for Gurobi
+    # cec_formulation_gurobi!(solution_copy, init_sol=cec_init_sol)
+    # call model with CEC formulation of DFVSP for SCIP
+    cec_formulation_scip!(solution_copy, init_sol=cec_init_sol)
+
+    # build new solution from MILP solution and reduction rules solution
+    new_solution = copy(solution_copy.x)
+    append!(new_solution, rr_solution)
+
+    # update the solution
+    sol.x = copy(new_solution)
+    sol.sel = (solution_copy.sel + length(rr_solution))
+
+    # objective value has changed, solution should be valid
+    invalidate!(sol)
+
+    # check validity of solution
+    # check(sol)
+
+    # update global best solution
+    update_global_best_solution_current_part(sol.x)
+
+    # debugging - start
+
+    @debug "Repair method: length of starting solution = $current_sol_length"
+    @debug "Repair method: length of resulting solution = $(length(sol.x))"
+    @debug "Repair method: number of selected elements in solution = $(sol.sel)"
+    # println("")
+    # println("Repair method: length of starting solution = ", current_sol_length)
+    # println("Repair method: length of resulting solution = ", length(sol.x))
+    # println("Repair method: number of selected elements in solution = ", sol.sel)
+    # println("")
+
+    # debugging - end
+
+end # function repair_dag_reduction_rules_cec_formulation_init_sol!
+
 
 
 """
@@ -3907,7 +5145,7 @@ function main()
 
     # start_time = time()
     start_time = process_start_time()
-    set_global_start_time(start_time)    
+    set_global_start_time(start_time)
     # start_time = get_start_time()
     # start_time = MyUtils.global_start_time
     @debug "Start time = $(global_start_time)"
@@ -4069,9 +5307,9 @@ function main()
     # ["--seed=1", "--mh_titer=11", "--mh_ttime=" * string(mh_run_time_limit)])  
 
     # time limit, unlimited number of iterations, changed max number to destroy from 100 to 1000
-    # limited number of iterations without improvement = 20
+    # limited number of iterations without improvement = 50
     parse_settings!([MHLib.Schedulers.settings_cfg, MHLib.ALNSs.settings_cfg],
-    ["--seed=1", "--mh_lnewinc=false", "--mh_titer=-1", "--mh_tciter=20", "--mh_ttime=" * string(mh_run_time_limit), "--alns_dest_max_abs=1000"])
+    ["--seed=1", "--mh_lnewinc=false", "--mh_titer=-1", "--mh_tciter=50", "--mh_ttime=" * string(mh_run_time_limit), "--alns_dest_max_abs=1000"])
 
     # time limit, unlimited number of iterations, changed max number to destroy from 100 to 1000
     # limited number of iterations without improvement = 10
@@ -4202,7 +5440,8 @@ function main()
                 clear_dfvs!(subgraph_solution)
                 # directly solve the problem with the MIP model, do not use LNS
                 # mtz_formulation!(subgraph_solution)
-                mtz_formulation_reduced!(subgraph_solution)
+                # mtz_formulation_reduced!(subgraph_solution)
+                cec_formulation_scip!(subgraph_solution)
                 append!(compound_solution, subgraph_solution.x)
                 # update the global best solution
                 update_global_best_solution_add_part(subgraph_solution.x)
@@ -4282,6 +5521,30 @@ function main()
                 #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
                 #     [MHMethod("destroy_dag_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
                 #     [MHMethod("repair_dag_rrs_mtz_reduced", repair_dag_reduction_rules_mtz_formulation_reduced!, 0)])
+
+                 # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DAG neighborhood and tournament selection with fixed size -> smallest hvalue
+                # and application of reduction rules to enlarged DAG, using CEC model
+                # lns_alg = ALNS(subgraph_solution,
+                #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                #     [MHMethod("destroy_dag_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
+                #     [MHMethod("repair_dag_rrs_cec", repair_dag_reduction_rules_cec_formulation!, 0)])
+
+                # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DAG neighborhood and tournament selection with fixed size -> smallest hvalue
+                # application of reduction rules to enlarged DAG, using CEC model with initial solution which is enabled by the only partial destruction
+                lns_alg = ALNS(subgraph_solution,
+                    [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                        MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                    [MHMethod("destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
+                    [MHMethod("repair_dag_rrs_cec_init_sol", repair_dag_reduction_rules_cec_formulation_init_sol!, 0)])
+
+                # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DAG neighborhood and tournament selection with fixed size -> smallest hvalue
+                # application of reduction rules without merging rules to enlarged DAG, using CEC model with initial solution which is enabled by the only partial destruction
+                # lns_alg = ALNS(subgraph_solution,
+                #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                #     [MHMethod("destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
+                #     [MHMethod("repair_dag_rrs_without_merging_cec_init_sol", repair_dag_reduction_rules_without_merging_cec_formulation_init_sol!, 0)])
 
                 # using CH with topo ord + neighbor check, LNS with enlarge DAG neighborhood and tournament selection -> highest hvalue
                 # lns_alg = ALNS(subgraph_solution,
@@ -4375,11 +5638,11 @@ function main()
 
                 # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DFVS neighborhood using has_path multi-src multi-dest, self-loop removal, REDUCED MTZ formulation 
                 # and partial destroy/repair with tournament selection with fixed size (destroy: highest value, repair: smallest value)
-                lns_alg = ALNS(subgraph_solution,
-                    [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3), 
-                        MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
-                    [MHMethod("destroy_dfvs_partially_ts_fixed_size_highest_fixed_k", destroy_dfvs_partially_tournament_selection_fixed_size_highest_fixed_k!, (1, tournament_sel_size))],
-                    [MHMethod("repair_dfvs_partially_ts_fixed_size_smallest_mtz_reduced_path_multi_src_multi_dest_selfloop_removal", repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_formulation_reduced_using_has_path_multi_src_multi_dest_and_selfloop_removal!, (partial_dfvs_size, tournament_sel_size))])
+                # lns_alg = ALNS(subgraph_solution,
+                #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3), 
+                #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                #     [MHMethod("destroy_dfvs_partially_ts_fixed_size_highest_fixed_k", destroy_dfvs_partially_tournament_selection_fixed_size_highest_fixed_k!, (1, tournament_sel_size))],
+                #     [MHMethod("repair_dfvs_partially_ts_fixed_size_smallest_mtz_reduced_path_multi_src_multi_dest_selfloop_removal", repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_formulation_reduced_using_has_path_multi_src_multi_dest_and_selfloop_removal!, (partial_dfvs_size, tournament_sel_size))])
 
                 # using only CH with cycle check, dummy methods for destroy + repair
                 # lns_alg = ALNS(subgraph_solution,
@@ -4428,6 +5691,29 @@ function main()
                 # lns_alg = ALNS(subgraph_solution,
                 #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3), 
                 #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
+                #     [MHMethod("repair_test", repair_test!, 0)])
+
+                # using only CH with topo ord + IMPROVED neighbor check and subsequent local search based on topological sorting, dummy methods for destroy + repair
+                # lns_alg = ALNS(subgraph_solution,
+                #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                #         MHMethod("local_search_topological_sort", local_search_topological_sort!, local_search_time_limit)],
+                #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
+                #     [MHMethod("repair_test", repair_test!, 0)])
+
+                # using only CH with topo ord + IMPROVED neighbor check and subsequent local search based on topological sorting,
+                # followed by LS with 1-deletion, dummy methods for destroy + repair
+                # lns_alg = ALNS(subgraph_solution,
+                #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                #         MHMethod("local_search_topological_sort", local_search_topological_sort!, local_search_time_limit),
+                #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
+                #     [MHMethod("repair_test", repair_test!, 0)])
+
+                # using only CH with topo ord + IMPROVED neighbor check and subsequent local search based on REPEATED topological sorting, dummy methods for destroy + repair
+                # lns_alg = ALNS(subgraph_solution,
+                #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                #         MHMethod("local_search_topological_sort_repeated", local_search_topological_sort_repeated!, local_search_time_limit)],
                 #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
                 #     [MHMethod("repair_test", repair_test!, 0)])
 
@@ -4493,7 +5779,8 @@ function main()
             clear_dfvs!(dfvsp_solution)
             # directly solve the problem with the MIP model, do not use LNS
             # mtz_formulation!(dfvsp_solution)
-            mtz_formulation_reduced!(dfvsp_solution)
+            # mtz_formulation_reduced!(dfvsp_solution)
+            cec_formulation_scip!(dfvsp_solution)
             append!(final_solution_vector, dfvsp_solution.x)
             # update the global best solution
             update_global_best_solution_add_part(dfvsp_solution.x)
@@ -4567,6 +5854,30 @@ function main()
             #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
             #     [MHMethod("destroy_dag_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
             #     [MHMethod("repair_dag_rrs_mtz_reduced", repair_dag_reduction_rules_mtz_formulation_reduced!, 0)])
+
+            # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DAG neighborhood and tournament selection with fixed size -> smallest hvalue
+            # and application of reduction rules to enlarged DAG, using CEC model
+            # lns_alg = ALNS(dfvsp_solution,
+            #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+            #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+            #     [MHMethod("destroy_dag_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
+            #     [MHMethod("repair_dag_rrs_cec", repair_dag_reduction_rules_cec_formulation!, 0)])
+
+            # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DAG neighborhood and tournament selection with fixed size -> smallest hvalue
+            # application of reduction rules to enlarged DAG, using CEC model with initial solution which is enabled by the only partial destruction
+            lns_alg = ALNS(dfvsp_solution,
+                [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+                    MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+                [MHMethod("destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
+                [MHMethod("repair_dag_rrs_cec_init_sol", repair_dag_reduction_rules_cec_formulation_init_sol!, 0)])
+
+            # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DAG neighborhood and tournament selection with fixed size -> smallest hvalue
+            # application of reduction rules without merging rules to enlarged DAG, using CEC model with initial solution which is enabled by the only partial destruction
+            # lns_alg = ALNS(dfvsp_solution,
+            #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+            #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+            #     [MHMethod("destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k", destroy_dag_partially_tournament_selection_fixed_size_smallest_fixed_k!, (1, tournament_sel_size))],
+            #     [MHMethod("repair_dag_rrs_without_merging_cec_init_sol", repair_dag_reduction_rules_without_merging_cec_formulation_init_sol!, 0)])
             
             # using CH with topo ord + neighbor check, LNS with enlarge DAG neighborhood and tournament selection -> highest hvalue
             # lns_alg = ALNS(dfvsp_solution, 
@@ -4660,11 +5971,11 @@ function main()
 
             # using CH with topo ord + IMPROVED neighbor check and subsequent local search mit multi-src multi-dest path, LNS with enlarge DFVS neighborhood using has_path multi-src multi-dest, self-loop removal, REDUCED MTZ formulation 
             # and partial destroy/repair with tournament selection with fixed size (destroy: highest value, repair: smallest value)
-            lns_alg = ALNS(dfvsp_solution,
-                [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3), 
-                    MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
-                [MHMethod("destroy_dfvs_partially_ts_fixed_size_highest_fixed_k", destroy_dfvs_partially_tournament_selection_fixed_size_highest_fixed_k!, (1, tournament_sel_size))],
-                [MHMethod("repair_dfvs_partially_ts_fixed_size_smallest_mtz_reduced_path_multi_src_multi_dest_selfloop_removal", repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_formulation_reduced_using_has_path_multi_src_multi_dest_and_selfloop_removal!, (partial_dfvs_size, tournament_sel_size))])
+            # lns_alg = ALNS(dfvsp_solution,
+            #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3), 
+            #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+            #     [MHMethod("destroy_dfvs_partially_ts_fixed_size_highest_fixed_k", destroy_dfvs_partially_tournament_selection_fixed_size_highest_fixed_k!, (1, tournament_sel_size))],
+            #     [MHMethod("repair_dfvs_partially_ts_fixed_size_smallest_mtz_reduced_path_multi_src_multi_dest_selfloop_removal", repair_dfvs_partially_tournament_selection_fixed_size_smallest_mtz_formulation_reduced_using_has_path_multi_src_multi_dest_and_selfloop_removal!, (partial_dfvs_size, tournament_sel_size))])
             
             # using only CH with cycle check, dummy methods for destroy + repair
             # lns_alg = ALNS(dfvsp_solution, 
@@ -4713,6 +6024,29 @@ function main()
             # lns_alg = ALNS(dfvsp_solution,
             #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3), 
             #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+            #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
+            #     [MHMethod("repair_test", repair_test!, 0)])
+
+            # using only CH with topo ord + IMPROVED neighbor check and subsequent local search based on topological sorting, dummy methods for destroy + repair
+            # lns_alg = ALNS(dfvsp_solution,
+            #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+            #         MHMethod("local_search_topological_sort", local_search_topological_sort!, local_search_time_limit)],
+            #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
+            #     [MHMethod("repair_test", repair_test!, 0)])
+
+            # using only CH with topo ord + IMPROVED neighbor check and subsequent local search based on topological sorting,
+            # followed by LS with 1-deletion, dummy methods for destroy + repair
+            # lns_alg = ALNS(dfvsp_solution,
+            #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+            #         MHMethod("local_search_topological_sort", local_search_topological_sort!, local_search_time_limit),
+            #         MHMethod("local_search_one_deletion", local_search_one_deletion!, local_search_time_limit)],
+            #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
+            #     [MHMethod("repair_test", repair_test!, 0)])
+
+            # using only CH with topo ord + IMPROVED neighbor check and subsequent local search based on REPEATED topological sorting, dummy methods for destroy + repair
+            # lns_alg = ALNS(dfvsp_solution,
+            #     [MHMethod("construct_topo_ord_neighbor_improved", construction_heuristic_indegree_outdegree_difference_alternative3!, 0.3),
+            #         MHMethod("local_search_topological_sort_repeated", local_search_topological_sort_repeated!, local_search_time_limit)],
             #     [MHMethod("destroy_test", destroy_random_fixed_k_test!, 1)],
             #     [MHMethod("repair_test", repair_test!, 0)])
 
